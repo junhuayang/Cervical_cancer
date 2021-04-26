@@ -1,0 +1,211 @@
+---
+title: "Model selection"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  word_document:
+    highlight: "monochrome"
+    fig_width: 6.5
+    fig_height: 4.50
+    reference_docx: "C:/Users/jyz7278/Box Sync/ASCO/Cervical Rad Hyst/NEJM/Analysis/Template/template_small_font_050417_090617.docx"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(comment = "  ", prompt=TRUE, warning = FALSE, 
+                      echo=TRUE, message = FALSE, include=TRUE)
+options(max.print=5000)
+```
+
+# load data
+```{r}
+load("C:/Users/jyz7278/Box Sync/ASCO/Cervical Rad Hyst/NEJM/Data/cer1.3.5.RData")
+
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tableone)
+library(car)
+library(coin)
+library(knitr)
+library(mice)
+library(reshape2)
+library(survival)
+library(survminer)
+library(KMsurv)
+library(survRM2)
+library(MatchIt)
+library(gridExtra)
+library(cobalt)
+
+dim(cer1.3.5) #2461
+
+cer1 <- cer1.3.5
+
+make.frm <- function(vars){
+  frm <- paste("Surv(fu, died) ~ ", paste(vars, collapse=" + ")) %>% as.formula
+  return(frm)
+}
+
+
+```
+
+# death events
+```{r}
+table(cer1$died) %>% addmargins() #164 death
+table(cer1$group, cer1$died) %>% addmargins() #164 death
+table(cer1$stage_mgh, cer1$died) %>% addmargins() #164 death
+
+
+```
+
+# Step 1: univariate analyses
+```{r}
+vars <- c("group", "rad_hys_extent", "radchemo", "postop_trt",
+          "tumor_size", "TUMOR_SIZE", "LNcount", "i_margin", "i_LNpos",
+          "i_grade", "LVSI", "histology",  "i_hospvol_cat2", "hospvol2", "i_CDCC",
+          "age", "newrace", "i_insure", "income", "type", "YEAR_OF_DIAGNOSIS", "stage_mgh")
+
+out1 <- NULL
+out2 <- NULL
+for (i in 1:length(vars)){
+  vname <- vars[i]
+  # frm <- paste("Surv(fu, died) ~ ", vname) %>% as.formula
+  frm <- make.frm(vname)
+  mod <- coxph(frm, data=cer1)
+  out1 <- rbind(out1, summary(mod)$coef)
+  out2 <- rbind(out2, Anova(mod)[2,])
+}
+
+```
+
+# Step 2: Fit model with vars that are significant in univariate analysis; ake out nonsignificant variables in a batch
+```{r}
+names(out2) <- c("loglik", "chisq", "df", "pval")
+sigvartab <- subset(out2, pval<.1)
+sigvars <- rownames(sigvartab)
+sigvars <- sigvars[sigvars != "radchemo"]
+sigvars <- sigvars[sigvars != "TUMOR_SIZE"]
+
+# frm1 <- paste("Surv(fu, died) ~ ", paste(sigvars, collapse=" + ")) %>% as.formula
+frm1 <- make.frm(sigvars)
+mod1 <- coxph(frm1, data=cer1)
+mod1 %>% summary
+mod1 %>% Anova
+
+# identify nonsignificant variables
+mod1anova <- (mod1 %>% Anova)
+names(mod1anova) <- c("LRchisq", "df", "pval")
+nonsigvartab <- subset(mod1anova, pval>.10)
+nonsigvars <- rownames(nonsigvartab)
+
+# variables for model 2 (exclude all non-significant)
+sigvars2 <- sigvars[!(sigvars %in% nonsigvars)]
+frm2 <- make.frm(sigvars2)
+
+# remove all non-significant variables
+mod2 <- coxph(frm2, data=cer1)
+mod2 %>% Anova
+
+# compare mod1 vs. mod1b
+anova(mod1, mod2) #LRT not sig
+
+frm1b <- make.frm(sigvars2[!(sigvars2 %in% "age")])
+mod2b <- coxph(frm1b, data=cer1)
+mod2b %>% Anova
+
+# compare mod2 vs. mod2b
+
+compareCoefs(mod2, mod2b,se=FALSE)
+
+# proceed with mod2
+
+```
+
+# Step 3: Check how much coefficients change
+```{r}
+coef1 <- as.data.frame(coef(mod1))
+coef1$vname <- rownames(coef1)
+coef2 <- as.data.frame(coef(mod2))
+coef2$vname <- rownames(coef2)
+
+coefs12 <- merge(coef1, coef2, by="vname", all=TRUE)
+names(coefs12) <- c("vname", "coef1", "coef2")
+coefs12$ratio <- coefs12$coef1/coefs12$coef2
+coefs12$iratio <-  coefs12$ratio>1.2 | coefs12$ratio<.8  # seems like it's okay to ignore not insured
+```
+
+# Step 4: Add each nonsignif variable from Step 2 back in
+
+```{r}
+for(vname in nonsigvars){
+  frm3 <- make.frm(c(sigvars2, vname))
+  anova(mod2, update(mod2, frm3)) %>% show
+}
+# none of them are important in the presence of other vars
+```
+
+# Step 5: Examine model fit
+```{r}
+mod5 <- mod2
+library(survival)
+cox.zph(mod5)
+plot(mod5)
+
+ph = cox.zph(mod5)
+ggcoxzph(ph,var=c("newraceHispanic"))   #Schoenfeld residual plot 
+ggcoxzph(ph,var=c("i_insureMedicare/Medicaid/Gov"))
+
+# proportional hazards seems to be Ok
+```
+
+# Step 6: Consider interactions
+```{r}
+update(mod5, ~ . + group:tumor_size) %>% Anova  
+update(mod5, ~ . + group:postop_trt) %>% Anova 
+update(mod5, ~ . + group:i_LNpos) %>% Anova 
+update(mod5, ~ . + group:i_insure) %>% Anova 
+update(mod5, ~ . + group:age) %>% Anova 
+```
+
+# Step 7: Check final model fit (other residual plots)
+```{r}
+# martingale residual
+mres <- resid(mod5, type="martingale")
+ggplot(data.frame(cer1, mres), aes(age, mres)) +
+    geom_point() +
+    geom_smooth(method="loess", se=FALSE, col="red") +
+    ylab("Martingale Residuals") +
+    theme_bw()  #looks almost linear 
+
+# deviance residual
+dres <- resid(mod5, type="deviance")
+plot(mod5$linear.predictor, dres,
+     xlab="Linear Predictor",ylab="Deviance Residuals")
+abline(0,0,lty=2,col='red')
+
+# Cox-Snell residual
+r.surv = survfit(Surv(fu, died)~1, data=cer1, type="fleming-harrington")
+plot(r.surv$time, -log(r.surv$surv)) # looks straight
+
+
+```
+
+
+
+```{r}
+
+cer1$grouptumor <- interaction(cer1$group, cer1$tumor_size)
+
+modtest <- coxph(Surv(fu, died) ~ relevel(grouptumor, ref="Open.>=2cm") + postop_trt + i_LNpos + 
+    i_grade + age + newrace + i_insure, data=cer1)
+modtest %>% Anova()
+modtest %>% summary()
+
+modtest2 <- coxph(Surv(fu, died) ~ group + tumor_size + postop_trt + i_LNpos + 
+    i_grade + age + newrace + i_insure + group:tumor_size, data=cer1)
+modtest2 %>% Anova()
+modtest2 %>% summary()
+
+
+```
+
+

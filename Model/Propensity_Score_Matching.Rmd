@@ -1,0 +1,428 @@
+---
+title: "Untitled"
+author: "Junhua Yang"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  word_document:
+    highlight: "monochrome"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(comment = "  ", prompt=TRUE, warning = FALSE, 
+                      echo=TRUE, message = FALSE, include=TRUE)
+options(max.print=5000)
+```
+
+# Load data
+```{r, echo=FALSE, include=FALSE}
+load("C:/Users/jyz7278/Box Sync/ASCO/Cervical Rad Hyst/NEJM/Data/cer1.3.5.RData")
+# load("C:/Users/mnk1805/Box Sync/ASCO/Cervical Rad Hyst/NEJM/Data/cer1.3.5.RData")
+cer1 <- as.data.frame(cer1.3.5)
+dim(cer1) #1893
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tableone)
+library(car)
+library(coin)
+library(knitr)
+library(mice)
+library(reshape2)
+library(survival)
+library(survminer)
+library(KMsurv)
+library(survRM2)
+library(MatchIt)
+library(gridExtra)
+library(cobalt)
+library(readxl)
+
+# library(emmeans)
+
+vars <- c("fu","died", "group", "rad_hys_extent", "radchemo", "postop_trt", 
+          "tumor_size", "TUMOR_SIZE", "LNcount", "i_margin", "i_LNpos", 
+          "i_grade", "LVSI", "histology",  "i_hospvol_cat2", "hospvol2", "i_CDCC", 
+          "age", "newrace", "i_insure", "income", "type", "YEAR_OF_DIAGNOSIS", "stage_mgh")
+sapply(cer1[vars], function(x)sum(is.na(x))) #21 missing in LNcount
+
+# Change "Minimal Invasive" to "MIS"
+levels(cer1$group) <- c("Open", "MIS")
+
+
+```
+
+# Death event counts
+```{r}
+
+table(cer1$died, cer1$group) %>% addmargins()  #91 events
+     
+with(subset(cer1, cer1$stagefigo=="IB1"), table(died, group)) %>% addmargins  #previously 87 events
+
+with(subset(cer1, cer1$YEAR_OF_DIAGNOSIS!="2013"), table(died, group)) %>% addmargins  #75 events 2010-2012
+
+```
+
+
+
+# Import imputed data from Stata
+```{r, include=FALSE, echo=FALSE}
+# impframe <- read_excel(
+#   "C:/Users/mnk1805/Box Sync/ASCO/Cervical Rad Hyst/NEJM/Data/cer4_imputed_062718.xlsx",
+#   sheet="Sheet1", na="")
+impframe <- read_excel(
+  "C:/Users/jyz7278/Box Sync/ASCO/Cervical Rad Hyst/NEJM/Data/cer4_imputed_062718.xlsx",
+  sheet="Sheet1", na="")
+impframe <- as.data.frame(impframe)
+names(impframe)
+colnames(impframe)[1] <- ".imp"
+colnames(impframe)[2] <- ".id"
+
+dim(impframe)
+sapply(impframe, function(x)sum(is.na(x))) 
+table(impframe$itumor_size2)
+
+# drop radchemo since it's not imputed
+impframe2 <- within(impframe, rm("radchemo", "tumor_size_imp"))
+str(impframe2)
+
+#convert vars to factors#
+# names <- c(".imp", ".id", "group", "histo", "iLVSI", "rad_hys_extent", "i_hospvol_cat2", 
+#            "income", "i_CDCC", "newrace", "i_insure", "ii_margin", "ipostop_trt", 
+#            "ii_LNpos", "ii_grade", "itumor_size2", "stage_mgh")
+names <- c(".imp", ".id", "group", "rad_hys_extent", "i_hospvol_cat2", 
+           "histology", "i_CDCC", "newrace", "i_insure", "type", "income", 
+           "YEAR_OF_DIAGNOSIS", "stage_mgh", "ii_margin", 
+           "ipostop_trt", "ii_LNpos", "ii_grade", "iLVSI", "itumor_size2")
+impframe2[,names] <- lapply(impframe2[, names] , factor)
+str(impframe2)
+
+levels(impframe2$itumor_size2) <- c("<2cm", ">=2cm")
+levels(impframe2$ipostop_trt) <- c("No", "Yes")
+levels(impframe2$iLVSI) <- c("No", "Yes")
+impframe2$i_insure <- relevel(impframe2$i_insure, ref="Private")
+impframe2$group <- relevel(impframe2$group, ref="Open")
+str(impframe2)
+
+# check stata imputation
+sapply(impframe2, function(x) summary(x)) # alomost the same as imp in R
+
+imp.data <- impframe2
+class(imp.data)
+
+```
+
+## import imputed data including imp=0 #
+```{r, include=FALSE, echo=FALSE}
+
+library(readxl)
+# impframeall <- read_excel(
+#   "C:/Users/mnk1805/Box Sync/ASCO/Cervical Rad Hyst/NEJM/Data/cer4_imputed_all_062718.xlsx",
+#   sheet="Sheet1", na="")
+impframeall <- read_excel(
+  "C:/Users/jyz7278/Box Sync/ASCO/Cervical Rad Hyst/NEJM/Data/cer4_imputed_all_062718.xlsx",
+  sheet="Sheet1", na="")
+impframeall <- as.data.frame(impframeall)
+names(impframeall)
+colnames(impframeall)[1] <- ".imp"
+colnames(impframeall)[2] <- ".id"
+dim(impframeall) #27071 = 2461*11
+
+
+# impframeall2 <- impframeall[c(1,2,3,4,5,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,
+#                               22,23,24,25,26,27,29)]
+# str(impframeall2)
+
+# impframeall <- impframeall2
+
+# names <- c(".imp", ".id", "group", "histo", "iLVSI", "rad_hys_extent", "i_hospvol_cat2", 
+#            "income", "i_CDCC", "newrace", "i_insure", "ii_margin", "ipostop_trt", 
+#            "ii_LNpos", "ii_grade", "itumor_size2", "stagefigo")
+names <- c(".imp", ".id", "group", "rad_hys_extent", "i_hospvol_cat2", 
+           "histology", "i_CDCC", "newrace", "i_insure", "type", "income", 
+           "YEAR_OF_DIAGNOSIS", "stage_mgh", "ii_margin", 
+           "ipostop_trt", "ii_LNpos", "ii_grade", "iLVSI", "itumor_size2")
+
+impframeall[,names] <- lapply(impframeall[,names] , factor)
+str(impframeall)
+
+levels(impframe2$itumor_size2) <- c("<2cm", ">=2cm")
+levels(impframeall$ipostop_trt) <- c("No", "Yes")
+levels(impframeall$iLVSI) <- c("No", "Yes")
+impframeall$i_insure <- relevel(impframeall$i_insure, ref="Private")
+impframeall$group <- relevel(impframeall$group, ref="Open")
+
+
+# impframeall$tumor_postop <- interaction(impframeall$itumor_size2,impframeall$ipostop_trt)
+
+sapply(impframeall, function(x)sum(is.na(x)))
+
+imp.data.all <- as.mids(impframeall)
+
+
+```
+
+
+# Fitting model for Imputed data
+
+## Fit final model
+
+```{r, include=FALSE, echo=FALSE}
+
+# Formula for the final model, based on models selection
+# frm.final <- as.formula(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+#                           ii_grade + age + newrace + stage_mgh + i_insure)
+
+frm.final <- as.formula(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                          ii_grade + age + newrace + i_insure)
+
+# Fit final model in the imputed data set
+fit1 <- vector("list", nlevels(imp.data$.imp))
+for (i in 1:10){
+  sub <- subset(imp.data, imp.data$.imp == i)
+  # fit1[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+  #                      ii_grade + age + newrace + stage_mgh + i_insure, data=sub)
+    fit1[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                       ii_grade + age + newrace + i_insure, data=sub)
+}
+
+fit1.mira <- as.mira(fit1)
+summary(pool(fit1.mira, method="smallsample")) 
+
+pool.fit1 <- as.data.frame(summary(pool(fit1.mira)))  
+names(pool.fit1)
+colnames(pool.fit1)[5]<-"pvalue"
+colnames(pool.fit1)[6]<-"lo"
+colnames(pool.fit1)[7]<-"hi"
+
+pool.fit1
+```
+
+## Get p-value for i_insure (insrance type)
+```{r, include=FALSE, echo=FALSE}
+
+# Fit final model in the imputed data set
+fit1 <- vector("list", nlevels(imp.data$.imp))
+for (i in 1:10){
+  sub <- subset(imp.data, imp.data$.imp == i)
+  # fit1[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+  #                      ii_grade + age + newrace + stage_mgh + i_insure, data=sub)
+  fit1[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                       ii_grade + age + newrace + i_insure, data=sub)
+}
+
+fit1.mira <- as.mira(fit1)
+summary(pool(fit1.mira, method="smallsample"))
+
+pool.fit1 <- as.data.frame(summary(pool(fit1.mira)))  
+names(pool.fit1)
+colnames(pool.fit1)[5]<-"pvalue"
+colnames(pool.fit1)[6]<-"lo"
+colnames(pool.fit1)[7]<-"hi"
+
+# Remove insurance
+fit.noins <- vector("list", nlevels(imp.data$.imp))
+for (i in 1:10){
+  sub <- subset(imp.data, imp.data$.imp == i)
+  # fit.noins[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+  #                               ii_grade + age + newrace + stage_mgh, data=sub)
+    fit.noins[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                                ii_grade + age + newrace, data=sub)
+}
+
+fit.nonins.mira <- as.mira(fit.noins)
+summary(pool(fit.nonins.mira, method="smallsample")) 
+
+pool.fit.noins <- as.data.frame(summary(pool(fit.nonins.mira)))  
+names(pool.fit.noins)
+colnames(pool.fit.noins)[5]<-"pvalue"
+colnames(pool.fit.noins)[6]<-"lo"
+colnames(pool.fit.noins)[7]<-"hi"
+
+# Compare fit1 vs. fit.noins (i.e. get Wald test for insurance)
+poolcomp.ins <- pool.compare(fit1.mira, fit.nonins.mira, method="Wald")
+pval.ins <- poolcomp.ins$pvalue
+format.pval(pval.ins)
+
+```
+
+# Get pvalue for newrace
+```{r, include=FALSE, echo=FALSE}
+
+# Fit final model in the imputed data set
+fit1 <- vector("list", nlevels(imp.data$.imp))
+for (i in 1:10){
+  sub <- subset(imp.data, imp.data$.imp == i)
+  # fit1[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+  #                      ii_grade + age + newrace + stage_mgh + i_insure, data=sub)
+  fit1[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                       ii_grade + age + newrace + i_insure, data=sub)
+}
+
+fit1.mira <- as.mira(fit1)
+summary(pool(fit1.mira, method="smallsample"))
+
+pool.fit1 <- as.data.frame(summary(pool(fit1.mira)))  
+names(pool.fit1)
+colnames(pool.fit1)[5]<-"pvalue"
+colnames(pool.fit1)[6]<-"lo"
+colnames(pool.fit1)[7]<-"hi"
+
+# Remove newrace
+fit.norace <- vector("list", nlevels(imp.data$.imp))
+for (i in 1:10){
+  sub <- subset(imp.data, imp.data$.imp == i)
+  # fit.noins[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+  #                               ii_grade + age + newrace + stage_mgh, data=sub)
+    fit.norace[[i]] <- coxph(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                                ii_grade + age + i_insure, data=sub)
+}
+
+fit.norace.mira <- as.mira(fit.norace)
+summary(pool(fit.norace.mira, method="smallsample")) 
+
+pool.fit.norace <- as.data.frame(summary(pool(fit.norace.mira)))  
+names(pool.fit.norace)
+colnames(pool.fit.norace)[5]<-"pvalue"
+colnames(pool.fit.norace)[6]<-"lo"
+colnames(pool.fit.norace)[7]<-"hi"
+
+# Compare fit1 vs. fit.noins (i.e. get Wald test for insurance)
+poolcomp.race <- pool.compare(fit1.mira, fit.norace.mira, method="Wald")
+pval.race <- poolcomp.race$pvalue
+format.pval(pval.race)
+```
+
+
+
+# Propensity Score Matched Model
+```{r, include=FALSE, echo=FALSE}
+
+par(ask=F)
+
+varexcl <- c(".imp", ".id", "fu", "died", "radchemo", "ch", "tumor_size_imp", "group") 
+vnames <- names(imp.data)[!(names(imp.data) %in% varexcl)]
+
+frm.ps <- paste("num ~ ", paste(vnames, collapse=" + ")) %>% as.formula
+
+# Make formulas for insurance and race, to get multi-df pvalues
+frm.final.wins <- as.formula(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                          ii_grade + age + newrace + i_insure)
+frm.final.woins <- as.formula(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                          ii_grade + age + newrace )
+
+frm.final.wrace <- as.formula(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                          ii_grade + age + i_insure + newrace)
+frm.final.worace <- as.formula(Surv(fu, died) ~ group + ipostop_trt + itumor_size2 + ii_LNpos + 
+                          ii_grade + age + i_insure )
+
+
+```
+
+
+```{r, include=FALSE, echo=FALSE}
+M <- nlevels(imp.data$.imp)
+fit.wins <- vector("list", M)
+fit.woins <- vector("list", M)
+fit.wrace <- vector("list", M)
+fit.worace <- vector("list", M)
+fit.match1 <- vector("list", M)
+loveplot <- vector("list", M)
+
+set.seed(62818)
+for (i in 1:M){
+  m.out <- matchit(frm.ps, caliper=0.5, data=imp.data[imp.data$.imp == i,])
+  matcheddata <- match.data(m.out)
+  # matcheddata$died %>% table
+  fit.wins[[i]] <-   coxph(frm.final.wins, data=matcheddata)
+  fit.woins[[i]] <-  coxph(frm.final.woins, data=matcheddata)
+  fit.wrace[[i]] <-  coxph(frm.final.wrace, data=matcheddata)
+  fit.worace[[i]] <- coxph(frm.final.worace, data=matcheddata)
+  fit.match1[[i]] <- fit.wins[[i]] # final model, just named more intuitively
+  
+  bal <- bal.tab(m.out)
+  loveplot[[i]] <- love.plot(bal, abs=TRUE, line=TRUE, var.order = "adjusted")
+} 
+
+fit.wins.mira   <- as.mira(fit.wins)
+fit.woins.mira  <- as.mira(fit.woins)
+fit.wrace.mira  <- as.mira(fit.wrace)
+fit.worace.mira <- as.mira(fit.worace)
+fit.match1.mira <- as.mira(fit.match1)
+
+fit.list.mira1 <- as.mira(fit.match1)
+
+# Get Wald test for insurance
+poolcomp.ins <- pool.compare(fit.wins.mira, fit.woins.mira, method="Wald")
+pval.match.ins <- poolcomp.ins$pvalue
+format.pval(pval.match.ins)
+
+# Get Wald test for race
+poolcomp.race <- pool.compare(fit.wrace.mira, fit.worace.mira, method="Wald")
+pval.match.race <- poolcomp.race$pvalue
+format.pval(pval.match.race)
+```
+
+
+```{r, include=FALSE, echo=FALSE}
+# check love plot for matched dataset
+loveplot[[1]]
+loveplot[[2]]
+loveplot[[3]]
+loveplot[[4]]
+loveplot[[5]]
+loveplot[[6]]
+loveplot[[7]]
+loveplot[[8]]
+loveplot[[9]]
+loveplot[[10]]
+
+# for (i in 1:10){
+#   print(loveplot[[i]])
+# }
+
+# with caliper=0.6, event=154, absolute mean difference a little bit >0.1 for year of diagnosis
+# with caliper=0.5, event=147, all vars well balanced
+
+# Absolute mean differences with a threshold of .1 
+# https://cran.r-project.org/web/packages/cobalt/vignettes/cobalt_A0_basic_use.html
+
+
+```
+# Results
+## Final imputed model
+
+Results from the final imputed model. The ovarall Wald test pvalue for insurance is `r format.pval(pval.ins, digits=4)` and for race is `r format.pval(pval.race, digits=4)`.
+
+
+```{r}
+data.frame(values=row.names(pool.fit1),
+           HR = pool.fit1$est %>% exp,
+           LL = pool.fit1$lo %>% exp,
+           UL = pool.fit1$hi %>% exp,
+           pvalue = pool.fit1$pvalue %>% format.pval(digits=4, eps=.0001))
+
+```
+
+## Propensity score matched results
+
+Results from the final imputed model with propensity score matching. The ovarall Wald test pvalue for insurance is `r format.pval(pval.match.ins, digits=4)` and for race is `r format.pval(pval.match.race, digits=4)`.
+
+
+```{r, include=FALSE}
+pool.match1 <- as.data.frame(summary(pool(fit.list.mira1)))  
+names(pool.match1)
+colnames(pool.match1)[5]<-"pvalue"
+colnames(pool.match1)[6]<-"lo"
+colnames(pool.match1)[7]<-"hi"
+```
+
+```{r}
+data.frame(values=row.names(pool.match1),
+           HR = pool.match1$est %>% exp,
+           LL = pool.match1$lo %>% exp,
+           UL = pool.match1$hi %>% exp,
+           pvalue = pool.match1$pvalue %>% format.pval(digits=4, eps=.0001))
+
+
+```
+
